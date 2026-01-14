@@ -1,0 +1,6 @@
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - rotate_keys.sh
+serviceAccount: sa-key-rotator@$PROJECT_ID.iam.gserviceaccount.com
