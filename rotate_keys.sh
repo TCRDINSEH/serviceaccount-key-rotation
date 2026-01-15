@@ -1,37 +1,55 @@
 #!/bin/bash
 set -euo pipefail
 
-# Rotation policy
-ROTATION_DAYS=1
-MAX_KEYS=2
+############################################
+# Configuration
+############################################
+ROTATION_DAYS=1        # Rotate if oldest key >= this age
+MAX_KEYS=2             # Maximum user-managed keys allowed
 CONFIG_FILE="sa_config.env"
 NOW=$(date +%s)
 
+############################################
+# Main loop
+############################################
 while IFS=',' read -r PROJECT_ID SA_EMAIL
 do
-  # Skip empty lines or commented lines
-  [[ -z "${PROJECT_ID:-}" || "${PROJECT_ID}" =~ ^# ]] && continue
+  # Skip empty or commented lines
+  [[ -z "${PROJECT_ID:-}" || "$PROJECT_ID" =~ ^# ]] && continue
 
-  echo "🔍 Processing $SA_EMAIL in $PROJECT_ID"
+  echo "=================================================="
+  echo "🔍 Processing $SA_EMAIL in project $PROJECT_ID"
 
-  # Log and update project
-  echo "➡️ Updating gcloud project to '$PROJECT_ID'"
+  ############################################
+  # Set project
+  ############################################
+  echo "➡️ Setting gcloud project to '$PROJECT_ID'"
   gcloud config set project "$PROJECT_ID" >/dev/null
 
-  SECRET_ID=$(echo "$SA_EMAIL" | sed 's/@/-/g;s/\./-/g')
+  ############################################
+  # Secret name (stable + valid)
+  ############################################
+  SECRET_ID=$(echo "$SA_EMAIL" | sed 's/@/-/g; s/\./-/g')
 
-  # List keys sorted by validAfterTime (oldest first)
-  echo "📋 Listing existing keys (raw):"
+  ############################################
+  # List USER-MANAGED keys only
+  ############################################
+  echo "📋 Listing existing USER-MANAGED keys:"
   KEYS=$(gcloud iam service-accounts keys list \
     --iam-account="$SA_EMAIL" \
+    --managed-by=user \
     --sort-by=validAfterTime \
     --format="value(name,validAfterTime)" || true)
 
-  if [ -z "$KEYS" ]; then
-    echo "⚠️ No existing keys found for $SA_EMAIL — creating initial key"
+  ############################################
+  # Case 1: No user-managed keys exist
+  ############################################
+  if [[ -z "$KEYS" ]]; then
+    echo "⚠️ No user-managed keys found — creating initial key"
+
     KEY_FILE=$(mktemp)
 
-    echo "🔑 Creating new key for $SA_EMAIL"
+    echo "🔑 Creating first key"
     gcloud iam service-accounts keys create "$KEY_FILE" \
       --iam-account="$SA_EMAIL"
 
@@ -39,40 +57,42 @@ do
     gcloud secrets describe "$SECRET_ID" >/dev/null 2>&1 || \
       gcloud secrets create "$SECRET_ID" --replication-policy=automatic
 
-    echo "➕ Adding new key to secret '$SECRET_ID'"
+    echo "➕ Storing key in Secret Manager"
     gcloud secrets versions add "$SECRET_ID" --data-file="$KEY_FILE"
+
     rm -f "$KEY_FILE"
 
-    echo "✅ Created first key for $SA_EMAIL and stored in secret $SECRET_ID"
-    echo "📋 Current keys (table):"
-    gcloud iam service-accounts keys list \
-      --iam-account="$SA_EMAIL" \
-      --format="table(name,validAfterTime)" || true
-
-    # Move to next service account after creating first key
+    echo "✅ Initial key created and stored"
     continue
   fi
 
-  echo "$KEYS" | sed -n '1,5p' || true
+  ############################################
+  # Display existing keys
+  ############################################
+  echo "$KEYS"
 
-  # Determine age of the oldest key (first line after sorting ascending)
+  ############################################
+  # Determine oldest key age
+  ############################################
   OLDEST_TIME=$(echo "$KEYS" | head -n1 | awk '{print $2}')
-  if [ -n "$OLDEST_TIME" ]; then
-    OLDEST_SEC=$(date -d "$OLDEST_TIME" +%s)
-    AGE_DAYS=$(( (NOW - OLDEST_SEC) / 86400 ))
-    echo "⏱ Oldest key age: ${AGE_DAYS} days (created: $OLDEST_TIME)"
-  else
-    # Defensive fallback (shouldn't happen because empty KEYS handled above)
-    AGE_DAYS=$ROTATION_DAYS
-    echo "⚠️ Could not determine oldest key time; forcing rotation path"
-  fi
+  OLDEST_SEC=$(date -d "$OLDEST_TIME" +%s)
+  AGE_DAYS=$(( (NOW - OLDEST_SEC) / 86400 ))
 
-  if [ "$AGE_DAYS" -lt "$ROTATION_DAYS" ]; then
-    echo "⏩ Rotation not required (age ${AGE_DAYS} < ${ROTATION_DAYS})"
+  echo "⏱ Oldest key age: ${AGE_DAYS} days (created: $OLDEST_TIME)"
+
+  ############################################
+  # Skip rotation if not needed
+  ############################################
+  if [[ "$AGE_DAYS" -lt "$ROTATION_DAYS" ]]; then
+    echo "⏩ Rotation not required"
     continue
   fi
 
-  echo "🔑 Creating new key (rotation) for $SA_EMAIL"
+  ############################################
+  # Rotate key
+  ############################################
+  echo "🔁 Rotating key"
+
   KEY_FILE=$(mktemp)
 
   gcloud iam service-accounts keys create "$KEY_FILE" \
@@ -82,36 +102,43 @@ do
   gcloud secrets describe "$SECRET_ID" >/dev/null 2>&1 || \
     gcloud secrets create "$SECRET_ID" --replication-policy=automatic
 
-  echo "➕ Adding rotated key to secret '$SECRET_ID'"
+  echo "➕ Adding rotated key to Secret Manager"
   gcloud secrets versions add "$SECRET_ID" --data-file="$KEY_FILE"
+
   rm -f "$KEY_FILE"
 
-  echo "📋 Listing keys (names only) after creation:"
+  ############################################
+  # List keys after rotation
+  ############################################
   KEY_NAMES=$(gcloud iam service-accounts keys list \
     --iam-account="$SA_EMAIL" \
+    --managed-by=user \
     --sort-by=validAfterTime \
     --format="value(name)" || true)
 
-  echo "$KEY_NAMES" || echo "(no keys listed)"
-
-  # Count non-empty lines only
   COUNT=$(echo "$KEY_NAMES" | sed '/^\s*$/d' | wc -l | tr -d ' ')
-  echo "🔢 Key count: $COUNT (max allowed: $MAX_KEYS)"
+  echo "🔢 User-managed key count: $COUNT"
 
-  if [ "$COUNT" -gt "$MAX_KEYS" ]; then
+  ############################################
+  # Delete old keys if exceeding MAX_KEYS
+  ############################################
+  if [[ "$COUNT" -gt "$MAX_KEYS" ]]; then
     DELETE_COUNT=$((COUNT - MAX_KEYS))
-    echo "🗑 Need to delete $DELETE_COUNT old key(s)"
-    # Delete the oldest keys (head of sorted list)
-    echo "$KEY_NAMES" | head -n "$DELETE_COUNT" | while read -r key; do
-      [ -z "$key" ] && continue
-      echo "🗑 Deleting old key $key"
-      gcloud iam service-accounts keys delete "$key" \
-        --iam-account="$SA_EMAIL" --quiet || \
-        echo "❗ Failed to delete key $key"
+    echo "🗑 Deleting $DELETE_COUNT old key(s)"
+
+    echo "$KEY_NAMES" | head -n "$DELETE_COUNT" | while read -r KEY; do
+      [[ -z "$KEY" ]] && continue
+      echo "🗑 Deleting key $KEY"
+      gcloud iam service-accounts keys delete "$KEY" \
+        --iam-account="$SA_EMAIL" \
+        --quiet
     done
   else
     echo "✅ No old keys to delete"
   fi
 
-  echo "✅ Completed for $SA_EMAIL"
+  echo "✅ Completed rotation for $SA_EMAIL"
+
 done < "$CONFIG_FILE"
+
+echo "🎉 All service accounts processed successfully"
