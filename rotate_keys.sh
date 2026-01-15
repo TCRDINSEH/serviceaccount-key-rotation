@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-ROTATION_DAYS=45
+ROTATION_DAYS=1
 MAX_KEYS=2
 CONFIG_FILE="sa_config.env"
 NOW=$(date +%s)
