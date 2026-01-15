@@ -4,7 +4,6 @@ steps:
     args:
       - rotate_keys.sh
 
-serviceAccount: sa-key-rotator@$PROJECT_ID.iam.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
