@@ -29,7 +29,9 @@ do
   ############################################
   # Secret name (stable + valid)
   ############################################
-  SECRET_ID=$(echo "$SA_EMAIL" | sed 's/@/-/g; s/\./-/g')
+  SA_NAME="${SA_EMAIL%@*}"
+  SECRET_ID="${SA_NAME}-sakey"
+
 
   ############################################
   # List USER-MANAGED keys only
