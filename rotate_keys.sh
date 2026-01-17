@@ -5,7 +5,7 @@ set -euo pipefail
 # Configuration
 ############################################
 ROTATION_DAYS=1        # Rotate if oldest key >= this age
-MAX_KEYS=2             # Maximum user-managed keys allowed
+MAX_KEYS=1             # Maximum user-managed keys allowed
 CONFIG_FILE="sa_config.env"
 NOW=$(date +%s)
 
