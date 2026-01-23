@@ -1,54 +1,86 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_ID="formal-cascade-484404-g4"
-SA_EMAIL="tf-jenkins@formal-cascade-484404-g4.iam.gserviceaccount.com"
+########################################
+# Configuration
+########################################
 ROTATION_DAYS=45
+CONFIG_FILE="sa_config.env"
 NOW=$(date +%s)
 
-echo "🔍 Checking keys for $SA_EMAIL"
+log() {
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+}
 
-KEYS=$(gcloud iam service-accounts keys list \
-  --project="$PROJECT_ID" \
-  --iam-account="$SA_EMAIL" \
-  --managed-by=user \
-  --sort-by=validAfterTime \
-  --format="value(name,validAfterTime)" || true)
+########################################
+# Main
+########################################
+while IFS=',' read -r PROJECT_ID SA_EMAIL; do
+  [[ -z "${PROJECT_ID:-}" || "$PROJECT_ID" =~ ^# ]] && continue
 
-# Bootstrap
-if [[ -z "$KEYS" ]]; then
-  echo "⚠️ No keys found — creating initial key"
-  gcloud iam service-accounts keys create sa-key.json \
-    --project="$PROJECT_ID" \
-    --iam-account="$SA_EMAIL"
-  rm -f sa-key.json
-  exit 0
-fi
+  log "Processing $SA_EMAIL in $PROJECT_ID"
 
-OLDEST_KEY=$(echo "$KEYS" | head -n1)
-KEY_NAME=$(awk '{print $1}' <<< "$OLDEST_KEY")
-KEY_TIME=$(awk '{print $2}' <<< "$OLDEST_KEY")
+  gcloud config set project "$PROJECT_ID" >/dev/null
 
-KEY_SEC=$(date -d "$KEY_TIME" +%s)
-AGE_DAYS=$(( (NOW - KEY_SEC) / 86400 ))
+  ########################################
+  # List user-managed keys (oldest → newest)
+  ########################################
+  KEYS=$(gcloud iam service-accounts keys list \
+    --iam-account="$SA_EMAIL" \
+    --managed-by=user \
+    --sort-by=validAfterTime \
+    --format="value(name,validAfterTime)" || true)
 
-echo "⏱ Oldest key age: $AGE_DAYS days"
+  ########################################
+  # Decide if rotation is needed
+  ########################################
+  ROTATE=true
 
-if [[ "$AGE_DAYS" -lt "$ROTATION_DAYS" ]]; then
-  echo "✅ Rotation not required"
-  exit 0
-fi
+  if [[ -n "$KEYS" ]]; then
+    NEWEST_TIME=$(echo "$KEYS" | tail -n1 | awk '{print $2}')
+    NEWEST_SEC=$(date -d "$NEWEST_TIME" +%s)
+    AGE_DAYS=$(( (NOW - NEWEST_SEC) / 86400 ))
 
-echo "🔁 Rotating key"
+    log "Newest key age: ${AGE_DAYS} days"
 
-gcloud iam service-accounts keys create sa-key.json \
-  --project="$PROJECT_ID" \
-  --iam-account="$SA_EMAIL"
+    if [[ "$AGE_DAYS" -lt "$ROTATION_DAYS" ]]; then
+      log "Rotation not required"
+      ROTATE=false
+    fi
+  fi
 
-gcloud iam service-accounts keys delete "$KEY_NAME" \
-  --project="$PROJECT_ID" \
-  --iam-account="$SA_EMAIL" \
-  --quiet
+  ########################################
+  # Create new key if required
+  ########################################
+  if [[ "$ROTATE" == true ]]; then
+    log "Creating new key"
+    gcloud iam service-accounts keys create /tmp/key.json \
+      --iam-account="$SA_EMAIL"
+  fi
 
-rm -f sa-key.json
-echo "🎉 Key rotation completed"
+  ########################################
+  # Delete all old keys, keep newest only
+  ########################################
+  KEY_NAMES=$(gcloud iam service-accounts keys list \
+    --iam-account="$SA_EMAIL" \
+    --managed-by=user \
+    --sort-by=validAfterTime \
+    --format="value(name)" || true)
+
+  COUNT=$(echo "$KEY_NAMES" | sed '/^\s*$/d' | wc -l)
+
+  if [[ "$COUNT" -gt 1 ]]; then
+    log "Deleting old keys"
+    echo "$KEY_NAMES" | head -n -1 | while read -r KEY; do
+      log "Deleting $KEY"
+      gcloud iam service-accounts keys delete "$KEY" \
+        --iam-account="$SA_EMAIL" --quiet
+    done
+  else
+    log "Only one key exists — nothing to delete"
+  fi
+
+  log "Completed $SA_EMAIL"
+done < "$CONFIG_FILE"
+
+log "All service accounts processed"
