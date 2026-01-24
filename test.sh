@@ -94,27 +94,29 @@ for SA_EMAIL in "${SERVICE_ACCOUNTS[@]}"; do
 ############################################
 # Enforce MAX_KEYS strictly (KEEP NEWEST ONLY)
 ############################################
-KEY_IDS=$(gcloud iam service-accounts keys list \
+KEY_NAMES=$(gcloud iam service-accounts keys list \
   --iam-account="$SA_EMAIL" \
   --managed-by=user \
   --sort-by=validAfterTime \
-  --format="value(name.basename())")
+  --format="value(name)")
 
-COUNT=$(echo "$KEY_IDS" | sed '/^\s*$/d' | wc -l | tr -d ' ')
+# Clean Windows CRLF if present
+KEY_NAMES=$(echo "$KEY_NAMES" | tr -d '\r')
+
+COUNT=$(echo "$KEY_NAMES" | sed '/^\s*$/d' | wc -l | tr -d ' ')
 echo "🔢 Active user-managed keys: $COUNT"
 
 if [[ "$COUNT" -gt "$MAX_KEYS" ]]; then
-  echo "🗑 Deleting all old keys, keeping newest only"
+  echo "🗑 Deleting old keys, keeping newest only"
 
-  # Delete everything EXCEPT the newest key (last line)
-  echo "$KEY_IDS" | head -n -"$MAX_KEYS" | while read -r KEY_ID; do
-    [[ -z "$KEY_ID" ]] && continue
-    echo "🗑 Deleting key $KEY_ID"
-    gcloud iam service-accounts keys delete "$KEY_ID" \
-      --iam-account="$SA_EMAIL" \
-      --quiet
+  echo "$KEY_NAMES" | head -n -"$MAX_KEYS" | while read -r KEY_NAME; do
+    [[ -z "$KEY_NAME" ]] && continue
+    echo "🗑 Deleting key $(basename "$KEY_NAME")"
+    gcloud iam service-accounts keys delete "$KEY_NAME"  --iam-account="$SA_EMAIL" --quiet
   done
 fi
+
+
 
 
   echo "✅ Completed rotation for $SA_EMAIL"
